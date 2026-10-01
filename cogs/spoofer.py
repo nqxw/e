@@ -1,19 +1,14 @@
-# cogs/spoofer.py | Platform spoofer — class-level send_json patch (discord.py-self)
+# cogs/spoofer.py — Platform spoofer for discord.py-self
 #
-# HOW IT WORKS (mirrors the original modifyself approach):
-#   discord.py-self uses DiscordWebSocket.send_json() for every gateway message.
-#   OP 2 = IDENTIFY.  We patch send_json AT THE CLASS LEVEL so even new WebSocket
-#   instances (created on reconnect) use our version.  When an OP2 payload passes
-#   through, we rewrite the 'properties' block before it hits the wire.
-#   Code 4000 on close forces a full reconnect + new IDENTIFY (not RESUME), so
-#   the patched IDENTIFY fires with our properties.
+# Strategy (three layers):
+#   1. http attribute patch  — sets .browser / .device / .os on the HTTPClient so
+#      the library's own identify() picks them up on every reconnect.
+#   2. class-level send patch — intercepts OP2 on send_json AND send_as_json so
+#      any identify payload is rewritten before it leaves the process.
+#   3. instance identify patch — hooks the new ws.identify() directly in
+#      on_connect, which fires *before* the identify is sent.
 #
-import asyncio
-import base64
-import json
-import random
-import time
-import traceback
+import asyncio, base64, json, random, time
 import discord
 from discord.ext import commands
 from . import state as S
@@ -41,27 +36,21 @@ PLATFORM_PRESETS = {
     "embedded":    {"os": "Windows",  "browser": "Chrome",          "device": "",            "label": "Embedded"},
 }
 
-# Correct user-agents per (os, browser) pair
 UA_MAP = {
     ("Android",  "Discord Android"): "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Mobile Safari/537.36",
-    ("Android",  "Discord VR"):      "Mozilla/5.0 (Linux; Android 12; Quest 3) AppleWebKit/537.36 (KHTML, like Gecko) OculusBrowser/37.0.0.0.43 SamsungBrowser/4.0 Chrome/122.0.6261.140 VR Safari/537.36",
+    ("Android",  "Discord VR"):      "Mozilla/5.0 (Linux; Android 12; Quest 3) AppleWebKit/537.36 (KHTML, like Gecko) OculusBrowser/37.0.0.0.43 Chrome/122.0.6261.140 VR Safari/537.36",
     ("iOS",      "Discord iOS"):     "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148",
     ("Windows",  "Chrome"):          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36",
     ("Mac OS X", "Chrome"):          "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36",
     ("Linux",    "Chrome"):          "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36",
 }
 
-# ── Module-level patch state (survives cog reloads) ───────────────────────────
-_POOL = {
-    "mode":   "sticky",   # sticky | rotate | random
-    "keys":   ["desktop"],
-    "pool":   [PLATFORM_PRESETS["desktop"]],
-    "cursor": 0,
-    "last":   None,
-}
-_PATCH_INFO  = {"installed": False, "path": None, "orig": None}
-_STATS       = {"identifies": 0, "reconnects": 0}
-_COG_REF     = [None]   # live SpooferCog instance for callbacks
+# ── Module-level state ────────────────────────────────────────────────────────
+_POOL   = {"mode": "sticky", "keys": ["desktop"],
+           "pool": [PLATFORM_PRESETS["desktop"]], "cursor": 0, "last": None}
+_PATCH  = {"json": False, "as_json": False, "orig_json": None, "orig_as_json": None, "path": None}
+_STATS  = {"identifies": 0, "reconnects": 0}
+_COG    = [None]   # live cog reference
 
 
 def _pick() -> dict | None:
@@ -69,8 +58,7 @@ def _pick() -> dict | None:
     if not pool: return None
     if _POOL["mode"] == "sticky": return pool[0]
     if _POOL["mode"] == "random": return random.choice(pool)
-    idx = _POOL["cursor"] % len(pool)
-    _POOL["cursor"] = idx + 1
+    idx = _POOL["cursor"] % len(pool); _POOL["cursor"] = idx + 1
     return pool[idx]
 
 
@@ -80,137 +68,216 @@ def _set_pool(keys: list):
     _POOL["cursor"] = 0
 
 
-# ── Class-level patch (the real mechanism) ────────────────────────────────────
+def _make_identify_payload(preset: dict, token: str) -> dict:
+    return {
+        "op": 2,
+        "d": {
+            "token":        token,
+            "capabilities": 16381,
+            "properties": {
+                "os":                        preset["os"],
+                "browser":                   preset["browser"],
+                "device":                    preset.get("device", ""),
+                "system_locale":             "en-US",
+                "browser_user_agent":        UA_MAP.get((preset["os"], preset["browser"]),
+                                              "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/132.0.0.0 Safari/537.36"),
+                "browser_version":           "132.0.0.0",
+                "os_version":                "",
+                "referrer":                  "",
+                "referring_domain":          "",
+                "referrer_current":          "",
+                "referring_domain_current":  "",
+                "release_channel":           "stable",
+                "client_build_number":       999999,
+                "client_event_source":       None,
+            },
+            "compress": False,
+            "client_state": {
+                "guild_versions":              {},
+                "highest_last_message_id":     "0",
+                "read_state_version":          0,
+                "user_guild_settings_version": -1,
+                "user_settings_version":       -1,
+                "private_channels_version":    "0",
+                "api_code_version":            0,
+            },
+            "presence": {"status": "online", "since": 0, "activities": [], "afk": False},
+        }
+    }
+
+
+# ── Layer 2: class-level send_json / send_as_json patch ───────────────────────
 def _find_ws_class(bot=None):
-    """Return discord.py-self's DiscordWebSocket class, or None."""
-    # Primary: standard discord.py-self location
     try:
         import discord.gateway as gw
         cls = getattr(gw, "DiscordWebSocket", None)
-        if cls and hasattr(cls, "send_json"):
-            return cls, "discord.gateway.DiscordWebSocket"
+        if cls: return cls, "discord.gateway.DiscordWebSocket"
     except Exception:
         pass
-    # Fallback: crawl bot's ws object
-    for bot_ref in ([bot] if bot else []):
-        ws = getattr(bot_ref, "ws", None)
-        if ws and hasattr(ws, "send_json"):
-            return type(ws), f"{type(ws).__module__}.{type(ws).__name__}"
+    ws = getattr(bot, "ws", None) if bot else None
+    if ws: return type(ws), f"{type(ws).__module__}.{type(ws).__name__}"
     return None, None
 
 
-def _install_patch(bot=None):
-    """
-    Patch send_json on the gateway WebSocket CLASS.
-    Every send_json call — on any instance, including new ones after reconnect —
-    passes through our interceptor, which rewrites OP2 properties.
-    """
-    if _PATCH_INFO["installed"]:
-        return True
-
+def _install_class_patch(bot=None):
     cls, path = _find_ws_class(bot)
-    if cls is None:
-        print("[spoofer] cannot find gateway class — patch NOT installed")
-        return False
-
-    orig = cls.send_json
-    _PATCH_INFO["orig"] = orig
-    _PATCH_INFO["path"] = path
-
-    async def _patched_send_json(self_ws, data):
-        try:
-            if isinstance(data, dict) and data.get("op") == 2:
-                preset = _pick()
-                if preset:
-                    d = data.setdefault("d", {})
-                    props = d.setdefault("properties", {})
-                    props["os"]      = preset["os"]
-                    props["browser"] = preset["browser"]
-                    props["device"]  = preset.get("device", "")
-                    ua = UA_MAP.get((preset["os"], preset["browser"]))
-                    if ua:
-                        props["browser_user_agent"] = ua
-                    _POOL["last"] = preset
-                    _STATS["identifies"] += 1
-                    cog = _COG_REF[0]
-                    if cog:
-                        cog._last_props = dict(props)
-                    print(f"[spoofer] IDENTIFY rewritten → {preset['label']} "
-                          f"(os={preset['os']} browser={preset['browser']} "
-                          f"device={preset.get('device','') or 'none'})")
-        except Exception as e:
-            print(f"[spoofer] patch rewrite error: {e}")
-        return await orig(self_ws, data)
-
-    cls.send_json = _patched_send_json
-    cls._spoofer_patched = True
-    _PATCH_INFO["installed"] = True
-    print(f"[spoofer] class patch installed → {path}.send_json")
-    return True
-
-
-def _remove_patch():
-    """Restore original send_json (called on cog unload if desired)."""
-    if not _PATCH_INFO["installed"] or not _PATCH_INFO["orig"]:
+    if not cls:
+        print("[spoofer] class not found — class patch skipped")
         return
-    try:
-        cls, _ = _find_ws_class()
-        if cls:
-            cls.send_json = _PATCH_INFO["orig"]
-            cls._spoofer_patched = False
-    except Exception:
-        pass
-    _PATCH_INFO["installed"] = False
-    _PATCH_INFO["orig"] = None
+
+    _PATCH["path"] = path
+
+    def _make_interceptor(orig, method_name):
+        async def interceptor(self_ws, data):
+            try:
+                if isinstance(data, dict) and data.get("op") == 2:
+                    preset = _pick()
+                    if preset:
+                        d     = data.setdefault("d", {})
+                        props = d.setdefault("properties", {})
+                        props["os"]                 = preset["os"]
+                        props["browser"]            = preset["browser"]
+                        props["device"]             = preset.get("device", "")
+                        ua = UA_MAP.get((preset["os"], preset["browser"]))
+                        if ua: props["browser_user_agent"] = ua
+                        _POOL["last"] = preset
+                        _STATS["identifies"] += 1
+                        cog = _COG[0]
+                        if cog: cog._last_props = dict(props)
+                        print(f"[spoofer] {method_name} OP2 → {preset['label']}")
+            except Exception as e:
+                print(f"[spoofer] {method_name} intercept error: {e}")
+            return await orig(self_ws, data)
+        return interceptor
+
+    for method in ("send_json", "send_as_json"):
+        orig = getattr(cls, method, None)
+        if orig and not getattr(cls, f"_spoofer_patched_{method}", False):
+            setattr(cls, method, _make_interceptor(orig, method))
+            setattr(cls, f"_spoofer_patched_{method}", True)
+            _PATCH[method.replace("send_", "")] = True
+            print(f"[spoofer] patched {path}.{method}")
+
+
+# ── Layer 1: http attribute patch (persists across reconnects) ────────────────
+def _patch_http(bot, preset: dict):
+    for attr_path in ("http", "_connection.http"):
+        try:
+            obj = bot
+            for part in attr_path.split("."):
+                obj = getattr(obj, part, None)
+                if obj is None: break
+            if obj is None: continue
+            for attr, key in [("browser", "browser"), ("device", "device"),
+                               ("os", "os"), ("user_agent", None)]:
+                if hasattr(obj, attr):
+                    if key:
+                        setattr(obj, attr, preset.get(key, ""))
+                    elif attr == "user_agent":
+                        ua = UA_MAP.get((preset["os"], preset["browser"]))
+                        if ua: setattr(obj, attr, ua)
+            print(f"[spoofer] http patch applied via {attr_path}")
+            return True
+        except Exception as e:
+            print(f"[spoofer] http patch ({attr_path}): {e}")
+    return False
 
 
 # ── Cog ───────────────────────────────────────────────────────────────────────
 class SpooferCog(commands.Cog, name="spoofer"):
-    """Platform spoofer — patches gateway send_json at class level."""
-
     def __init__(self, bot):
         self.bot         = bot
         self._last_props = None
-        _COG_REF[0]      = self
-        # Install the patch immediately (bot is already connected)
-        ok = _install_patch(bot)
-        if not ok:
-            # Gateway class not importable yet; will retry on_ready/on_connect
-            print("[spoofer] will retry patch install on connect")
+        _COG[0] = self
+        _install_class_patch(bot)
 
     async def cog_load(self):
-        # If not patched yet (import failed at __init__), try again
-        if not _PATCH_INFO["installed"]:
-            _install_patch(self.bot)
+        if not (_PATCH.get("json") or _PATCH.get("as_json")):
+            _install_class_patch(self.bot)
 
-    # Re-apply on every (re)connect — guarantees the patch is on the new ws class
+    # ── Layer 3: instance identify patch ──────────────────────────────────────
     @commands.Cog.listener()
     async def on_connect(self):
-        if not _PATCH_INFO["installed"]:
-            _install_patch(self.bot)
+        """
+        Fires AFTER the new WebSocket connects but BEFORE identify is sent.
+        Patch ws.identify on the new instance directly so even if the class
+        patch missed, this instance will send our custom properties.
+        """
+        if not _POOL["pool"]: return
+        # Also retry class patch in case class wasn't importable at __init__
+        _install_class_patch(self.bot)
+
+        ws = getattr(self.bot, "ws", None)
+        if not ws: return
+        preset = _pick()
+        if not preset: return
+
+        # Patch http attributes (layer 1)
+        _patch_http(self.bot, preset)
+
+        # Patch this instance's identify method (layer 3)
+        for method_name in ("identify", "_identify"):
+            orig = getattr(ws, method_name, None)
+            if orig and not getattr(ws, f"_spoof_patched_{method_name}", False):
+                token   = S.TOKEN
+                _preset = dict(preset)
+
+                async def _patched(p=_preset, t=token, ws_ref=ws):
+                    try:
+                        payload = _make_identify_payload(p, t)
+                        for send_m in ("send_json", "send_as_json"):
+                            fn = getattr(ws_ref, send_m, None)
+                            if fn:
+                                await fn(payload)
+                                _POOL["last"] = p
+                                _STATS["identifies"] += 1
+                                if _COG[0]: _COG[0]._last_props = dict(p)
+                                print(f"[spoofer] instance identify sent → {p['label']}")
+                                return
+                    except Exception as e:
+                        print(f"[spoofer] patched identify error: {e}")
+
+                setattr(ws, method_name, _patched)
+                setattr(ws, f"_spoof_patched_{method_name}", True)
+                print(f"[spoofer] instance {method_name} patched")
 
     @commands.Cog.listener()
     async def on_ready(self):
-        if not _PATCH_INFO["installed"]:
-            _install_patch(self.bot)
+        _install_class_patch(self.bot)
 
     async def _reconnect(self):
-        """Close with code 4000 → full reconnect, new IDENTIFY (not RESUME)."""
         _STATS["reconnects"] += 1
         ws = getattr(self.bot, "ws", None)
-        if ws and hasattr(ws, "close"):
-            try:
-                await ws.close(code=4000)
-                return
-            except Exception as e:
-                print(f"[spoofer] ws.close(4000): {e}")
-        # Fallback: close with 1000
-        if ws and hasattr(ws, "close"):
-            try: await ws.close(code=1000)
-            except Exception: pass
+        if ws:
+            for code in (4000, 1012, 1000):
+                try:
+                    await ws.close(code=code)
+                    return
+                except Exception as e:
+                    print(f"[spoofer] close({code}): {e}")
+
+    async def _apply_and_reconnect(self, preset: dict, label: str, ctx):
+        _set_pool([label]); _POOL["mode"] = "sticky"
+        _patch_http(self.bot, preset)
+        await ctx.message.edit(content=S.ui_ok(f"spoofing → {preset['label']}  (reconnecting…)"))
+        await self._reconnect()
+        # Wait for identify to fire (up to 10s)
+        for _ in range(10):
+            await asyncio.sleep(1)
+            if _POOL["last"]:
+                break
+        last = _POOL["last"]
+        if last:
+            await ctx.channel.send(S.ui_ok(
+                f"✓  identified as {last['label']}\n"
+                f"   os={last['os']}  browser={last['browser']}"
+                f"  device={last.get('device','') or 'none'}"))
+        else:
+            await ctx.channel.send(S.ui_warn(
+                "reconnected — IDENTIFY not intercepted yet  "
+                "(class patch may not have fired; try .spooferdiag)"))
 
     # ── Commands ──────────────────────────────────────────────────────────────
-
     @commands.command(name="spoof", aliases=["spoofer"], brief="Spoof platform — spoof <preset>")
     async def spoof(self, ctx, platform: str = "", sub: str = "", *, rest: str = ""):
         if not platform or platform in ("status", "info"):
@@ -223,17 +290,13 @@ class SpooferCog(commands.Cog, name="spoofer"):
             if sub not in PLATFORM_PRESETS:
                 return await ctx.message.edit(content=S.ui_err(f"unknown: {sub}"))
             if sub not in _POOL["keys"]:
-                _POOL["keys"].append(sub)
-                _POOL["pool"].append(PLATFORM_PRESETS[sub])
-            return await ctx.message.edit(
-                content=S.ui_ok(f"added {sub} to pool ({len(_POOL['keys'])} total)"))
+                _POOL["keys"].append(sub); _POOL["pool"].append(PLATFORM_PRESETS[sub])
+            return await ctx.message.edit(content=S.ui_ok(f"added {sub} — pool: {', '.join(_POOL['keys'])}"))
 
         if p == "remove" and sub:
             sub = sub.lower()
             if sub in _POOL["keys"]:
-                i = _POOL["keys"].index(sub)
-                _POOL["keys"].pop(i)
-                _POOL["pool"].pop(i)
+                i = _POOL["keys"].index(sub); _POOL["keys"].pop(i); _POOL["pool"].pop(i)
             return await ctx.message.edit(content=S.ui_ok(f"removed {sub}"))
 
         if p == "mode" and sub in ("rotate", "random", "sticky"):
@@ -242,71 +305,41 @@ class SpooferCog(commands.Cog, name="spoofer"):
 
         if p == "clear":
             _set_pool([])
-            return await ctx.message.edit(content=S.ui_ok("pool cleared — no spoofing"))
+            return await ctx.message.edit(content=S.ui_ok("pool cleared"))
 
         if p == "reset":
-            _set_pool(["desktop"]); _POOL["mode"] = "sticky"
-            await ctx.message.edit(content=S.ui_ok("reset → Desktop"))
-            await self._reconnect()
+            preset = PLATFORM_PRESETS["desktop"]
+            await self._apply_and_reconnect(preset, "desktop", ctx)
             return
 
         if p == "pool":
-            rows = []
-            for i, k in enumerate(_POOL["keys"]):
-                marker = "→ " if (_POOL["mode"] == "rotate"
-                                  and i == _POOL["cursor"] % max(len(_POOL["keys"]),1)) else "  "
-                rows.append(f"  {S.DIM}{marker}{S.RESET}{k:<12} {PLATFORM_PRESETS[k]['label']}")
-            rows += [
-                "",
-                f"  {S.DIM}mode  {S.RESET}{_POOL['mode']}  "
-                f"cursor {_POOL['cursor']}  size {len(_POOL['keys'])}",
-            ]
+            rows = [f"  {k:<12} {PLATFORM_PRESETS[k]['label']}" for k in _POOL["keys"]]
+            rows.append(f"\n  mode {_POOL['mode']}  cursor {_POOL['cursor']}")
             return await ctx.message.edit(content=S.ui_box("spoof pool", rows))
 
         if p not in PLATFORM_PRESETS:
             return await ctx.message.edit(
-                content=S.ui_err(f"unknown preset: {p}  |  valid: {', '.join(PLATFORM_PRESETS)}"))
+                content=S.ui_err(f"unknown: {p}  ·  valid: {', '.join(PLATFORM_PRESETS)}"))
 
-        _set_pool([p]); _POOL["mode"] = "sticky"
-        preset = PLATFORM_PRESETS[p]
-        await ctx.message.edit(content=S.ui_ok(
-            f"spoofing → {preset['label']}  (reconnecting…)"))
-        await self._reconnect()
-        # Brief wait then confirm
-        await asyncio.sleep(4)
-        last = _POOL["last"]
-        if last:
-            await ctx.channel.send(S.ui_ok(
-                f"✓  IDENTIFY sent as {last['label']}  "
-                f"(os={last['os']} / browser={last['browser']} / "
-                f"device={last.get('device','') or 'none'})"))
-        else:
-            await ctx.channel.send(S.ui_warn("reconnected but IDENTIFY not fired yet"))
+        await self._apply_and_reconnect(PLATFORM_PRESETS[p], p, ctx)
 
-    @commands.command(name="vr", brief="Spoof VR headset (Meta Quest)")
+    @commands.command(name="vr", brief="Spoof Meta Quest VR headset")
     async def vr(self, ctx):
-        _set_pool(["vr"]); _POOL["mode"] = "sticky"
-        await ctx.message.edit(content=S.ui_ok("spoofing → VR Headset  (reconnecting…)"))
-        await self._reconnect()
+        await self._apply_and_reconnect(PLATFORM_PRESETS["vr"], "vr", ctx)
 
     @commands.command(name="console", brief="Spoof console platform")
     async def console(self, ctx):
-        _set_pool(["console"]); _POOL["mode"] = "sticky"
-        await ctx.message.edit(content=S.ui_ok("spoofing → Console  (reconnecting…)"))
-        await self._reconnect()
+        await self._apply_and_reconnect(PLATFORM_PRESETS["console"], "console", ctx)
 
     @commands.command(name="spoofreset", brief="Reset spoofer to desktop")
     async def spoofreset(self, ctx):
-        _set_pool(["desktop"]); _POOL["mode"] = "sticky"
-        await ctx.message.edit(content=S.ui_ok("reset → Desktop  (reconnecting…)"))
-        await self._reconnect()
+        await self._apply_and_reconnect(PLATFORM_PRESETS["desktop"], "desktop", ctx)
 
-    @commands.command(name="platform", brief="Alias: platform <preset>")
+    @commands.command(name="platform", brief="platform <preset>")
     async def platform_cmd(self, ctx, *, preset: str = ""):
         key = preset.strip().lower().split()[0] if preset.strip() else ""
         if not key:
-            rows = [f"  {S.CYAN}{k:<12}{S.RESET} {v['label']}"
-                    for k, v in PLATFORM_PRESETS.items()]
+            rows = [f"  {k:<14} {v['label']}" for k, v in PLATFORM_PRESETS.items()]
             return await ctx.message.edit(content=S.ui_box("platforms", rows))
         await self.spoof(ctx, key)
 
@@ -317,25 +350,31 @@ class SpooferCog(commands.Cog, name="spoofer"):
     @commands.command(name="spooferdiag", brief="Full spoofer diagnostics")
     async def spooferdiag(self, ctx):
         cls, path = _find_ws_class(self.bot)
-        patched   = bool(getattr(cls, "_spoofer_patched", False)) if cls else False
-        p         = self._last_props or {}
-        ws        = getattr(self.bot, "ws", None)
+        ws = getattr(self.bot, "ws", None)
+        p  = self._last_props or {}
+        patched_json    = getattr(cls, "_spoofer_patched_send_json",    False) if cls else False
+        patched_as_json = getattr(cls, "_spoofer_patched_send_as_json", False) if cls else False
+        ws_has_identify = hasattr(ws, "_spoof_patched_identify") if ws else False
         rows = [
-            f"  {S.DIM}patch installed{S.RESET}  {'YES ✓' if _PATCH_INFO['installed'] else 'NO ✗'}",
-            f"  {S.DIM}class found{S.RESET}     {path or 'NOT FOUND'}",
-            f"  {S.DIM}class patched{S.RESET}   {'YES ✓' if patched else 'NO ✗'}",
-            f"  {S.DIM}ws type{S.RESET}         {type(ws).__name__ if ws else 'None'}",
+            f"  {S.DIM}class found{S.RESET}         {path or 'NOT FOUND'}",
+            f"  {S.DIM}send_json patched{S.RESET}   {'✓' if patched_json    else '✗'}",
+            f"  {S.DIM}send_as_json patched{S.RESET}{'✓' if patched_as_json else '✗'}",
+            f"  {S.DIM}instance identify{S.RESET}   {'✓' if ws_has_identify  else '✗'}",
+            f"  {S.DIM}ws type{S.RESET}             {type(ws).__name__ if ws else 'None'}",
+            f"  {S.DIM}has send_json{S.RESET}       {hasattr(ws, 'send_json') if ws else False}",
+            f"  {S.DIM}has send_as_json{S.RESET}    {hasattr(ws, 'send_as_json') if ws else False}",
+            f"  {S.DIM}has identify{S.RESET}        {hasattr(ws, 'identify') if ws else False}",
+            f"  {S.DIM}has _identify{S.RESET}       {hasattr(ws, '_identify') if ws else False}",
             "",
-            f"  {S.DIM}pool mode{S.RESET}  {_POOL['mode']}",
-            f"  {S.DIM}pool keys{S.RESET}  {', '.join(_POOL['keys']) or '—'}",
-            f"  {S.DIM}last pick{S.RESET}  {_POOL['last']['label'] if _POOL['last'] else '—'}",
+            f"  {S.DIM}pool{S.RESET}  {', '.join(_POOL['keys']) or '—'}",
+            f"  {S.DIM}mode{S.RESET}  {_POOL['mode']}",
+            f"  {S.DIM}last{S.RESET}  {_POOL['last']['label'] if _POOL['last'] else '—'}",
+            f"  {S.DIM}os{S.RESET}    {p.get('os','—')}",
+            f"  {S.DIM}browser{S.RESET}  {p.get('browser','—')}",
+            f"  {S.DIM}device{S.RESET}   {p.get('device','—') or 'none'}",
             "",
-            f"  {S.DIM}last os{S.RESET}      {p.get('os','—')}",
-            f"  {S.DIM}last browser{S.RESET} {p.get('browser','—')}",
-            f"  {S.DIM}last device{S.RESET}  {p.get('device','—') or 'none'}",
-            "",
-            f"  {S.DIM}identifies{S.RESET}   {_STATS['identifies']}",
-            f"  {S.DIM}reconnects{S.RESET}   {_STATS['reconnects']}",
+            f"  {S.DIM}identifies{S.RESET}  {_STATS['identifies']}",
+            f"  {S.DIM}reconnects{S.RESET}  {_STATS['reconnects']}",
         ]
         await ctx.message.edit(content=S.ui_box("spoofer diag", rows))
 
@@ -343,17 +382,16 @@ class SpooferCog(commands.Cog, name="spoofer"):
         preset = _POOL["last"] or {}
         p      = self._last_props or {}
         rows = [
-            f"  {S.DIM}preset{S.RESET}    {preset.get('label','—')}",
-            f"  {S.DIM}pool{S.RESET}      {', '.join(_POOL['keys']) or '—'}",
-            f"  {S.DIM}mode{S.RESET}      {_POOL['mode']}",
+            f"  {S.DIM}preset{S.RESET}   {preset.get('label','—')}",
+            f"  {S.DIM}pool{S.RESET}     {', '.join(_POOL['keys']) or '—'}",
+            f"  {S.DIM}mode{S.RESET}     {_POOL['mode']}",
             "",
-            f"  {S.DIM}os{S.RESET}        {p.get('os', preset.get('os','?'))}",
-            f"  {S.DIM}browser{S.RESET}   {p.get('browser', preset.get('browser','?'))}",
-            f"  {S.DIM}device{S.RESET}    {p.get('device', preset.get('device','?')) or 'none'}",
+            f"  {S.DIM}os{S.RESET}       {p.get('os', preset.get('os','?'))}",
+            f"  {S.DIM}browser{S.RESET}  {p.get('browser', preset.get('browser','?'))}",
+            f"  {S.DIM}device{S.RESET}   {p.get('device', preset.get('device','?')) or 'none'}",
             "",
             f"  {S.DIM}identifies{S.RESET} {_STATS['identifies']}",
             f"  {S.DIM}reconnects{S.RESET} {_STATS['reconnects']}",
-            f"  {S.DIM}patched{S.RESET}    {'yes ✓' if _PATCH_INFO['installed'] else 'NO ✗  — run spoof <preset> to activate'}",
             "",
             f"  {S.DIM}valid: {', '.join(PLATFORM_PRESETS)}{S.RESET}",
         ]

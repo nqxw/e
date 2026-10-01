@@ -108,6 +108,7 @@ class RPCCog(commands.Cog, name="rpc"):
         self._watchdog_task        = None
         self._last_push_ts         = 0.0
         self._watchdog_cycles      = 0
+        self._icon_cache: dict     = {}   # icon key -> mp:attachments key
 
     async def cog_load(self):
         # Load saved slots + asset URLs, then start watchdog
@@ -409,6 +410,39 @@ class RPCCog(commands.Cog, name="rpc"):
             print(f"[rpc] upload_asset: {e}")
         return None
 
+
+    # ── Icon fetch helper ─────────────────────────────────────────────────────
+    async def _fetch_app_icon(self, app_id: str, cache_key: str) -> str | None:
+        """
+        Fetch a Discord application's icon via the /applications/{id}/rpc endpoint,
+        upload it to Discord CDN via DM, and return the resulting mp:attachments key.
+        Falls back to None so callers can use the raw asset-key string instead.
+        """
+        if cache_key in self._icon_cache:
+            return self._icon_cache[cache_key]
+        try:
+            h = {"Authorization": S.TOKEN, "User-Agent": S.USER_AGENT}
+            async with aiohttp.ClientSession(headers=h) as sess:
+                async with sess.get(
+                    f"https://discord.com/api/v9/applications/{app_id}/rpc"
+                ) as r:
+                    if r.status != 200:
+                        print(f"[rpc] icon fetch {app_id}: HTTP {r.status}")
+                        return None
+                    data = await r.json()
+            icon_hash = data.get("icon")
+            if not icon_hash:
+                return None
+            icon_url = f"https://cdn.discordapp.com/app-icons/{app_id}/{icon_hash}.webp?size=512"
+            mp_key   = await self.upload_asset(icon_url)
+            if mp_key:
+                self._icon_cache[cache_key] = mp_key
+                print(f"[rpc] cached icon {cache_key} → {mp_key[:40]}")
+            return mp_key
+        except Exception as e:
+            print(f"[rpc] _fetch_app_icon({app_id}): {e}")
+            return None
+
     # ── Custom status ─────────────────────────────────────────────────────────
     async def _patch_custom_status(self):
         try:
@@ -509,11 +543,16 @@ class RPCCog(commands.Cog, name="rpc"):
             preset = ICON_PRESETS[key]
             self._ensure_slot(slot)
             self.rpc_slots[slot]["application_id"] = preset["application_id"]
-            self.rpc_slots[slot].setdefault("assets", {})["large_image"] = preset["large_image"]
+            # Try to get the real Discord app icon (guaranteed to render)
+            mp_key = await self._fetch_app_icon(preset["application_id"], key)
+            large_image = mp_key if mp_key else preset["large_image"]
+            self.rpc_slots[slot].setdefault("assets", {})["large_image"] = large_image
             if preset.get("small_text"):
                 self.rpc_slots[slot]["assets"]["large_text"] = preset["small_text"]
             await self.apply_activities()
-            return await ctx.message.edit(content=S.ui_ok(f"{label} icon → {key}"))
+            src_label = "uploaded" if mp_key else "asset key"
+            return await ctx.message.edit(
+                content=S.ui_ok(f"{label} icon → {key}  ({src_label})"))
         elif sub == "details":
             self._ensure_slot(slot); self.rpc_slots[slot]["details"] = rest
         elif sub == "state":
@@ -894,7 +933,7 @@ class RPCCog(commands.Cog, name="rpc"):
         now    = int(time.time() * 1000)
         cur_ms = int(posv * 60 * 1000); tot_ms = int(dur * 60 * 1000)
 
-        lg = "spotify"
+        lg = await self._fetch_app_icon("3201606009684", "spotify") or "spotify"
         if kw.get("img"):
             k = await self.upload_asset(kw["img"])
             if k: lg = k
@@ -932,7 +971,7 @@ class RPCCog(commands.Cog, name="rpc"):
         now     = int(time.time() * 1000)
         cur_ms  = int(posv * 60 * 1000); tot_ms = int(dur * 60 * 1000)
 
-        lg = "youtube"
+        lg = await self._fetch_app_icon("111299001912", "youtube") or "youtube"
         if kw.get("img"):
             k = await self.upload_asset(kw["img"])
             if k: lg = k
@@ -954,7 +993,7 @@ class RPCCog(commands.Cog, name="rpc"):
         """xbox Game - details:Achievement - state:Online - img:URL - btn:Label|URL"""
         pos, kw = self._parse_kwargs(parts)
         game    = (pos[0] if pos else "Xbox")[:128]
-        lg      = "xbox"
+        lg      = await self._fetch_app_icon("622174530214821906", "xbox") or "xbox"
         if kw.get("img"):
             k = await self.upload_asset(kw["img"])
             if k: lg = k
@@ -980,7 +1019,7 @@ class RPCCog(commands.Cog, name="rpc"):
         game    = (pos[0] if pos else "PlayStation")[:128]
         plat    = "ps4" if ps4 else "ps5"
         label   = "PS4"  if ps4 else "PS5"
-        lg      = "playstation"
+        lg      = await self._fetch_app_icon("1470539864909943067", "playstation") or "playstation"
         if kw.get("img"):
             k = await self.upload_asset(kw["img"])
             if k: lg = k
@@ -1009,7 +1048,7 @@ class RPCCog(commands.Cog, name="rpc"):
         total    = float(kw.get("total",   kw.get("dur", pos[3] if len(pos)>3 else "24.0")))
         now      = int(time.time() * 1000)
         cur_ms   = int(elapsed * 60 * 1000); tot_ms = int(total * 60 * 1000)
-        lg       = "crunchyroll"
+        lg       = await self._fetch_app_icon("981509069309354054", "crunchyroll") or "crunchyroll"
         if kw.get("img"):
             k = await self.upload_asset(kw["img"])
             if k: lg = k
@@ -1034,7 +1073,7 @@ class RPCCog(commands.Cog, name="rpc"):
         state    = kw.get("state") or (pos[0] if pos else "Exploring VRChat")
         world    = pos[1] if len(pos)>1 else "VRChat"
         img_url  = image_url or kw.get("img")
-        lg       = "vrchat"
+        lg       = await self._fetch_app_icon("1498387526501535835", "vrchat") or "vrchat"
         if img_url:
             k = await self.upload_asset(img_url)
             if k: lg = k
@@ -1057,7 +1096,8 @@ class RPCCog(commands.Cog, name="rpc"):
         """roblox Game - state:With friends - img:URL - btn:Play|URL"""
         pos, kw = self._parse_kwargs(parts)
         game    = (pos[0] if pos else "Roblox")[:128]
-        lg      = "roblox"
+        # Try fetching the real Roblox Discord app icon (renders reliably)
+        lg = await self._fetch_app_icon("1552026905023356938", "roblox") or "roblox"
         if kw.get("img"):
             k = await self.upload_asset(kw["img"])
             if k: lg = k
