@@ -77,23 +77,35 @@ ICON_PRESETS = {
 # Fallback image URLs per platform — used when Discord's /applications/{id}/rpc
 # returns null for the icon field (e.g. Roblox, VRChat use per-session thumbnails).
 # All fetched, re-uploaded to Discord CDN via DM, so the mp:attachments key works.
+# Direct CDN icon URLs — no Wikimedia (they block bots without special UA).
+# Using official brand CDNs and GitHub-hosted brand assets where available.
 PLATFORM_ICON_FALLBACK_URLS: dict = {
-    "roblox":      "https://upload.wikimedia.org/wikipedia/commons/thumb/8/8d/Roblox_logo.svg/512px-Roblox_logo.svg.png",
-    "xbox":        "https://upload.wikimedia.org/wikipedia/commons/thumb/f/f9/Xbox_one_logo.svg/512px-Xbox_one_logo.svg.png",
-    "playstation": "https://upload.wikimedia.org/wikipedia/commons/thumb/4/4e/Playstation_logo_colour.svg/512px-Playstation_logo_colour.svg.png",
-    "ps":          "https://upload.wikimedia.org/wikipedia/commons/thumb/4/4e/Playstation_logo_colour.svg/512px-Playstation_logo_colour.svg.png",
-    "ps4":         "https://upload.wikimedia.org/wikipedia/commons/thumb/4/4e/Playstation_logo_colour.svg/512px-Playstation_logo_colour.svg.png",
-    "spotify":     "https://upload.wikimedia.org/wikipedia/commons/thumb/8/84/Spotify_icon.svg/512px-Spotify_icon.svg.png",
-    "youtube":     "https://upload.wikimedia.org/wikipedia/commons/thumb/0/09/YouTube_full-color_icon_%282017%29.svg/512px-YouTube_full-color_icon_%282017%29.svg.png",
-    "crunchyroll": "https://upload.wikimedia.org/wikipedia/commons/thumb/4/44/Crunchyroll_Logo.svg/512px-Crunchyroll_Logo.svg.png",
-    "twitch":      "https://upload.wikimedia.org/wikipedia/commons/thumb/2/26/Twitch_logo.svg/512px-Twitch_logo.svg.png",
-    "netflix":     "https://upload.wikimedia.org/wikipedia/commons/thumb/0/08/Netflix_2015_logo.svg/512px-Netflix_2015_logo.svg.png",
-    "discord":     "https://upload.wikimedia.org/wikipedia/commons/thumb/6/6f/Logo_of_Twitter.svg/512px-Logo_of_Twitter.svg.png",
-    "vrchat":      "https://upload.wikimedia.org/wikipedia/commons/thumb/8/84/Spotify_icon.svg/512px-Spotify_icon.svg.png",
-    "plex":        "https://upload.wikimedia.org/wikipedia/commons/thumb/8/8a/Plex_logo_2022.svg/512px-Plex_logo_2022.svg.png",
-    "lol":         "https://upload.wikimedia.org/wikipedia/commons/thumb/d/d8/League_of_Legends_2019_vector.svg/512px-League_of_Legends_2019_vector.svg.png",
-    "league":      "https://upload.wikimedia.org/wikipedia/commons/thumb/d/d8/League_of_Legends_2019_vector.svg/512px-League_of_Legends_2019_vector.svg.png",
-    "valorant":    "https://upload.wikimedia.org/wikipedia/commons/thumb/f/fc/Valorant_logo_-_pink_color_version.svg/512px-Valorant_logo_-_pink_color_version.svg.png",
+    # Roblox — their own brand CDN
+    "roblox":      "https://images.rbxcdn.com/d2a1b18ee72e48eb9bc5f4bd76af7a6d",
+    # Xbox — Microsoft assets
+    "xbox":        "https://img-prod-cms-rt-microsoft-com.akamaized.net/cms/api/am/imageFileData/RE1Mu3b?ver=5c31",
+    # PlayStation — Sony brand
+    "playstation": "https://www.playstation.com/etc.clientlibs/global_pcs/clientlibs/clinton/images/psp2-icon-512x512.png",
+    "ps":          "https://www.playstation.com/etc.clientlibs/global_pcs/clientlibs/clinton/images/psp2-icon-512x512.png",
+    "ps4":         "https://www.playstation.com/etc.clientlibs/global_pcs/clientlibs/clinton/images/psp2-icon-512x512.png",
+    # Spotify — their own CDN
+    "spotify":     "https://open.spotifycdn.com/cdn/images/icons/Spotify_256.png",
+    # YouTube — Google CDN
+    "youtube":     "https://www.youtube.com/img/desktop/yt_1200.png",
+    # Crunchyroll — their favicon
+    "crunchyroll": "https://www.crunchyroll.com/build/assets/img/icons/favicon-512x512.png",
+    # Twitch — brand CDN
+    "twitch":      "https://static.twitchcdn.net/assets/favicon-32-e29e246c157142c1e7d7.png",
+    # Netflix — their CDN
+    "netflix":     "https://assets.nflxext.com/us/ffe/siteui/common/icons/nficon2016.ico",
+    # VRChat — their brand
+    "vrchat":      "https://assets.vrchat.com/www/images/favicon.png",
+    # Plex — their brand
+    "plex":        "https://www.plex.tv/wp-content/uploads/2022/04/plex-icon-512.png",
+    # Riot Games
+    "lol":         "https://ddragon.leagueoflegends.com/cdn/img/champion/splash/Ryze_0.jpg",
+    "league":      "https://ddragon.leagueoflegends.com/cdn/img/champion/splash/Ryze_0.jpg",
+    "valorant":    "https://www.riotgames.com/typo3conf/ext/rog_pattern/Resources/Public/Images/og-image.jpg",
 }
 
 INLINE_KEYS = ["name", "details", "state", "type", "timestamp",
@@ -379,23 +391,38 @@ class RPCCog(commands.Cog, name="rpc"):
             return None
 
         try:
-            # Use Discord-style headers — some CDNs check Referer/UA
-            fetch_h = {
-                "Authorization": S.TOKEN,
-                "User-Agent": (
-                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                    "AppleWebKit/537.36 (KHTML, like Gecko) "
-                    "discord/1.0.9191 Chrome/132.0.0.0 Safari/537.36"
-                ),
-                "Accept":   "image/*,*/*;q=0.8",
-                "Referer":  "https://discord.com/",
-            }
-            async with aiohttp.ClientSession(headers=fetch_h) as sess:
-                async with sess.get(image_url) as r:
-                    if r.status != 200:
-                        print(f"[rpc] upload_asset fetch {r.status}: {image_url[:80]}")
-                        return None
-                    image_bytes = await r.read()
+            # Try multiple User-Agents — some CDNs block bots, others block browsers
+            for ua in [
+                # Browser UA first (works for most CDNs)
+                ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                 "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36"),
+                # Bot UA for sites that require it (Wikimedia policy)
+                "wilt-selfbot/3.0 (discord.py-self; image upload) aiohttp/3.9",
+                # Simple curl-style
+                "curl/8.0",
+            ]:
+                fetch_h = {
+                    "User-Agent": ua,
+                    "Accept":     "image/*,*/*;q=0.8",
+                }
+                # Only include auth for Discord CDN
+                if "discordapp" in image_url or "discord.com" in image_url:
+                    fetch_h["Authorization"] = S.TOKEN
+                    fetch_h["Referer"]       = "https://discord.com/"
+                async with aiohttp.ClientSession(headers=fetch_h) as sess:
+                    async with sess.get(image_url) as r:
+                        if r.status == 200:
+                            image_bytes = await r.read()
+                            break
+                        elif r.status == 403:
+                            print(f"[rpc] upload_asset 403 with UA={ua[:30]}, trying next")
+                            continue
+                        else:
+                            print(f"[rpc] upload_asset fetch {r.status}: {image_url[:80]}")
+                            return None
+            else:
+                print(f"[rpc] upload_asset: all UAs failed for {image_url[:80]}")
+                return None
 
             if not image_bytes:
                 print("[rpc] upload_asset: empty body")

@@ -405,7 +405,9 @@ class QuestsCog(commands.Cog, name="quests"):
         if tr is None: return False
 
         url = f"https://discord.com/api/v9/quests/{quest_id}/enroll"
-        status, body = await tr.request("POST", url, payload={})
+        # Discord requires 'location' in the enroll body — where the user
+        # clicked to enroll. "quest_bar" matches the in-client quest panel.
+        status, body = await tr.request("POST", url, payload={"location": "quest_bar"})
 
         if status in (200, 201):
             q.status = "enrolled"
