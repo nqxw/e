@@ -139,7 +139,7 @@ CATEGORY_DESC = {
     "quests":        "quest completer, auto-enroll, orb badge",
     "sniper":        "nitro sniper, giveaway, extended snipe",
     "afk":           "AFK replies — whitelist, blacklist, per-server",
-    "rpc":           "rich presence — slots, spotify, xbox, ps, vrchat",
+    "rpc":           "rich presence — 6 slots · icon · appname · xbox/ps/spotify/roblox/vrchat",
     "spoofer":       "platform / device spoofing",
     "status":        "custom status, rotate, steal",
     "social":        "friends, block, pending requests",
