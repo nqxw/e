@@ -80,32 +80,40 @@ ICON_PRESETS = {
 # Direct CDN icon URLs — no Wikimedia (they block bots without special UA).
 # Using official brand CDNs and GitHub-hosted brand assets where available.
 PLATFORM_ICON_FALLBACK_URLS: dict = {
-    # Roblox — their own brand CDN
-    "roblox":      "https://images.rbxcdn.com/d2a1b18ee72e48eb9bc5f4bd76af7a6d",
-    # Xbox — Microsoft assets
-    "xbox":        "https://img-prod-cms-rt-microsoft-com.akamaized.net/cms/api/am/imageFileData/RE1Mu3b?ver=5c31",
-    # PlayStation — Sony brand
-    "playstation": "https://www.playstation.com/etc.clientlibs/global_pcs/clientlibs/clinton/images/psp2-icon-512x512.png",
-    "ps":          "https://www.playstation.com/etc.clientlibs/global_pcs/clientlibs/clinton/images/psp2-icon-512x512.png",
-    "ps4":         "https://www.playstation.com/etc.clientlibs/global_pcs/clientlibs/clinton/images/psp2-icon-512x512.png",
-    # Spotify — their own CDN
-    "spotify":     "https://open.spotifycdn.com/cdn/images/icons/Spotify_256.png",
-    # YouTube — Google CDN
-    "youtube":     "https://www.youtube.com/img/desktop/yt_1200.png",
-    # Crunchyroll — their favicon
-    "crunchyroll": "https://www.crunchyroll.com/build/assets/img/icons/favicon-512x512.png",
-    # Twitch — brand CDN
-    "twitch":      "https://static.twitchcdn.net/assets/favicon-32-e29e246c157142c1e7d7.png",
-    # Netflix — their CDN
-    "netflix":     "https://assets.nflxext.com/us/ffe/siteui/common/icons/nficon2016.ico",
-    # VRChat — their brand
-    "vrchat":      "https://assets.vrchat.com/www/images/favicon.png",
-    # Plex — their brand
-    "plex":        "https://www.plex.tv/wp-content/uploads/2022/04/plex-icon-512.png",
-    # Riot Games
-    "lol":         "https://ddragon.leagueoflegends.com/cdn/img/champion/splash/Ryze_0.jpg",
-    "league":      "https://ddragon.leagueoflegends.com/cdn/img/champion/splash/Ryze_0.jpg",
-    "valorant":    "https://www.riotgames.com/typo3conf/ext/rog_pattern/Resources/Public/Images/og-image.jpg",
+    # Google's favicon API — returns real PNG, no auth, globally cached, never 403.
+    # Format: https://t3.gstatic.com/faviconV2?client=SOCIAL&type=FAVICON&fallback_opts=TYPE,SIZE,URL&url=DOMAIN&size=256
+    "roblox":      "https://t3.gstatic.com/faviconV2?client=SOCIAL&type=FAVICON&fallback_opts=TYPE,SIZE,URL&url=https://roblox.com&size=256",
+    "xbox":        "https://t3.gstatic.com/faviconV2?client=SOCIAL&type=FAVICON&fallback_opts=TYPE,SIZE,URL&url=https://xbox.com&size=256",
+    "playstation": "https://t3.gstatic.com/faviconV2?client=SOCIAL&type=FAVICON&fallback_opts=TYPE,SIZE,URL&url=https://playstation.com&size=256",
+    "ps":          "https://t3.gstatic.com/faviconV2?client=SOCIAL&type=FAVICON&fallback_opts=TYPE,SIZE,URL&url=https://playstation.com&size=256",
+    "ps4":         "https://t3.gstatic.com/faviconV2?client=SOCIAL&type=FAVICON&fallback_opts=TYPE,SIZE,URL&url=https://playstation.com&size=256",
+    "spotify":     "https://t3.gstatic.com/faviconV2?client=SOCIAL&type=FAVICON&fallback_opts=TYPE,SIZE,URL&url=https://spotify.com&size=256",
+    "youtube":     "https://t3.gstatic.com/faviconV2?client=SOCIAL&type=FAVICON&fallback_opts=TYPE,SIZE,URL&url=https://youtube.com&size=256",
+    "crunchyroll": "https://t3.gstatic.com/faviconV2?client=SOCIAL&type=FAVICON&fallback_opts=TYPE,SIZE,URL&url=https://crunchyroll.com&size=256",
+    "twitch":      "https://t3.gstatic.com/faviconV2?client=SOCIAL&type=FAVICON&fallback_opts=TYPE,SIZE,URL&url=https://twitch.tv&size=256",
+    "netflix":     "https://t3.gstatic.com/faviconV2?client=SOCIAL&type=FAVICON&fallback_opts=TYPE,SIZE,URL&url=https://netflix.com&size=256",
+    "vrchat":      "https://t3.gstatic.com/faviconV2?client=SOCIAL&type=FAVICON&fallback_opts=TYPE,SIZE,URL&url=https://vrchat.com&size=256",
+    "plex":        "https://t3.gstatic.com/faviconV2?client=SOCIAL&type=FAVICON&fallback_opts=TYPE,SIZE,URL&url=https://plex.tv&size=256",
+    "lol":         "https://t3.gstatic.com/faviconV2?client=SOCIAL&type=FAVICON&fallback_opts=TYPE,SIZE,URL&url=https://leagueoflegends.com&size=256",
+    "league":      "https://t3.gstatic.com/faviconV2?client=SOCIAL&type=FAVICON&fallback_opts=TYPE,SIZE,URL&url=https://leagueoflegends.com&size=256",
+    "valorant":    "https://t3.gstatic.com/faviconV2?client=SOCIAL&type=FAVICON&fallback_opts=TYPE,SIZE,URL&url=https://playvalorant.com&size=256",
+    "discord":     "https://t3.gstatic.com/faviconV2?client=SOCIAL&type=FAVICON&fallback_opts=TYPE,SIZE,URL&url=https://discord.com&size=256",
+    "prime":       "https://t3.gstatic.com/faviconV2?client=SOCIAL&type=FAVICON&fallback_opts=TYPE,SIZE,URL&url=https://primevideo.com&size=256",
+    "disney":      "https://t3.gstatic.com/faviconV2?client=SOCIAL&type=FAVICON&fallback_opts=TYPE,SIZE,URL&url=https://disneyplus.com&size=256",
+    "hulu":        "https://t3.gstatic.com/faviconV2?client=SOCIAL&type=FAVICON&fallback_opts=TYPE,SIZE,URL&url=https://hulu.com&size=256",
+    "ps5":           "https://t3.gstatic.com/faviconV2?client=SOCIAL&type=FAVICON&fallback_opts=TYPE,SIZE,URL&url=https://playstation.com&size=256",
+    "meta":          "https://t3.gstatic.com/faviconV2?client=SOCIAL&type=FAVICON&fallback_opts=TYPE,SIZE,URL&url=https://meta.com&size=256",
+    "quest":         "https://t3.gstatic.com/faviconV2?client=SOCIAL&type=FAVICON&fallback_opts=TYPE,SIZE,URL&url=https://meta.com&size=256",
+    "quest2":        "https://t3.gstatic.com/faviconV2?client=SOCIAL&type=FAVICON&fallback_opts=TYPE,SIZE,URL&url=https://meta.com&size=256",
+    "quest3":        "https://t3.gstatic.com/faviconV2?client=SOCIAL&type=FAVICON&fallback_opts=TYPE,SIZE,URL&url=https://meta.com&size=256",
+    "metaquest":     "https://t3.gstatic.com/faviconV2?client=SOCIAL&type=FAVICON&fallback_opts=TYPE,SIZE,URL&url=https://meta.com&size=256",
+    "primevideo":    "https://t3.gstatic.com/faviconV2?client=SOCIAL&type=FAVICON&fallback_opts=TYPE,SIZE,URL&url=https://primevideo.com&size=256",
+    "disneyplus":    "https://t3.gstatic.com/faviconV2?client=SOCIAL&type=FAVICON&fallback_opts=TYPE,SIZE,URL&url=https://disneyplus.com&size=256",
+    "funimation":    "https://t3.gstatic.com/faviconV2?client=SOCIAL&type=FAVICON&fallback_opts=TYPE,SIZE,URL&url=https://crunchyroll.com&size=256",
+    "appletv":       "https://t3.gstatic.com/faviconV2?client=SOCIAL&type=FAVICON&fallback_opts=TYPE,SIZE,URL&url=https://tv.apple.com&size=256",
+    "apple_tv":      "https://t3.gstatic.com/faviconV2?client=SOCIAL&type=FAVICON&fallback_opts=TYPE,SIZE,URL&url=https://tv.apple.com&size=256",
+    "leagueoflegends":"https://t3.gstatic.com/faviconV2?client=SOCIAL&type=FAVICON&fallback_opts=TYPE,SIZE,URL&url=https://leagueoflegends.com&size=256",
+    "tft":           "https://t3.gstatic.com/faviconV2?client=SOCIAL&type=FAVICON&fallback_opts=TYPE,SIZE,URL&url=https://teamfighttactics.leagueoflegends.com&size=256",
 }
 
 INLINE_KEYS = ["name", "details", "state", "type", "timestamp",
@@ -434,10 +442,24 @@ class RPCCog(commands.Cog, name="rpc"):
             if name.lower().endswith(".webp"):
                 name = name.rsplit(".", 1)[0] + ".png"
 
-            # Get DM channel with self
-            self_dm = self.bot.user.dm_channel
+            # ClientUser (selfbot) has no dm_channel/create_dm().
+            # Use the HTTP API directly to open a DM with our own account.
+            self_dm = None
+            try:
+                # Fastest: already cached
+                self_dm = self.bot._connection._get_private_channel_by_user(
+                    self.bot.user.id)
+            except Exception:
+                pass
             if self_dm is None:
-                self_dm = await self.bot.user.create_dm()
+                try:
+                    data = await self.bot.http.start_private_message(
+                        self.bot.user.id)
+                    self_dm = (self.bot.get_channel(int(data["id"])) or
+                               self.bot._connection.add_dm_channel(data))
+                except Exception as e2:
+                    print(f"[rpc] start_private_message: {e2}")
+                    return None
 
             msg = await self_dm.send(
                 file=discord.File(io.BytesIO(image_bytes), filename=name))
