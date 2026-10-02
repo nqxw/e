@@ -168,14 +168,11 @@ def _patch_http(bot, preset: dict):
                 obj = getattr(obj, part, None)
                 if obj is None: break
             if obj is None: continue
-            for attr, key in [("browser", "browser"), ("device", "device"),
-                               ("os", "os"), ("user_agent", None)]:
+            # user_agent is read-only on HTTPClient — only patch writable attrs
+            for attr, key in [("browser","browser"),("device","device"),("os","os")]:
                 if hasattr(obj, attr):
-                    if key:
-                        setattr(obj, attr, preset.get(key, ""))
-                    elif attr == "user_agent":
-                        ua = UA_MAP.get((preset["os"], preset["browser"]))
-                        if ua: setattr(obj, attr, ua)
+                    try: setattr(obj, attr, preset.get(key, ""))
+                    except (AttributeError, TypeError): pass
             print(f"[spoofer] http patch applied via {attr_path}")
             return True
         except Exception as e:

@@ -74,6 +74,28 @@ ICON_PRESETS = {
     "tft":             {"application_id": "401518684763586560", "large_image": "teamfight_tactics",  "small_text": "Teamfight Tactics"},
 }
 
+# Fallback image URLs per platform — used when Discord's /applications/{id}/rpc
+# returns null for the icon field (e.g. Roblox, VRChat use per-session thumbnails).
+# All fetched, re-uploaded to Discord CDN via DM, so the mp:attachments key works.
+PLATFORM_ICON_FALLBACK_URLS: dict = {
+    "roblox":      "https://upload.wikimedia.org/wikipedia/commons/thumb/8/8d/Roblox_logo.svg/512px-Roblox_logo.svg.png",
+    "xbox":        "https://upload.wikimedia.org/wikipedia/commons/thumb/f/f9/Xbox_one_logo.svg/512px-Xbox_one_logo.svg.png",
+    "playstation": "https://upload.wikimedia.org/wikipedia/commons/thumb/4/4e/Playstation_logo_colour.svg/512px-Playstation_logo_colour.svg.png",
+    "ps":          "https://upload.wikimedia.org/wikipedia/commons/thumb/4/4e/Playstation_logo_colour.svg/512px-Playstation_logo_colour.svg.png",
+    "ps4":         "https://upload.wikimedia.org/wikipedia/commons/thumb/4/4e/Playstation_logo_colour.svg/512px-Playstation_logo_colour.svg.png",
+    "spotify":     "https://upload.wikimedia.org/wikipedia/commons/thumb/8/84/Spotify_icon.svg/512px-Spotify_icon.svg.png",
+    "youtube":     "https://upload.wikimedia.org/wikipedia/commons/thumb/0/09/YouTube_full-color_icon_%282017%29.svg/512px-YouTube_full-color_icon_%282017%29.svg.png",
+    "crunchyroll": "https://upload.wikimedia.org/wikipedia/commons/thumb/4/44/Crunchyroll_Logo.svg/512px-Crunchyroll_Logo.svg.png",
+    "twitch":      "https://upload.wikimedia.org/wikipedia/commons/thumb/2/26/Twitch_logo.svg/512px-Twitch_logo.svg.png",
+    "netflix":     "https://upload.wikimedia.org/wikipedia/commons/thumb/0/08/Netflix_2015_logo.svg/512px-Netflix_2015_logo.svg.png",
+    "discord":     "https://upload.wikimedia.org/wikipedia/commons/thumb/6/6f/Logo_of_Twitter.svg/512px-Logo_of_Twitter.svg.png",
+    "vrchat":      "https://upload.wikimedia.org/wikipedia/commons/thumb/8/84/Spotify_icon.svg/512px-Spotify_icon.svg.png",
+    "plex":        "https://upload.wikimedia.org/wikipedia/commons/thumb/8/8a/Plex_logo_2022.svg/512px-Plex_logo_2022.svg.png",
+    "lol":         "https://upload.wikimedia.org/wikipedia/commons/thumb/d/d8/League_of_Legends_2019_vector.svg/512px-League_of_Legends_2019_vector.svg.png",
+    "league":      "https://upload.wikimedia.org/wikipedia/commons/thumb/d/d8/League_of_Legends_2019_vector.svg/512px-League_of_Legends_2019_vector.svg.png",
+    "valorant":    "https://upload.wikimedia.org/wikipedia/commons/thumb/f/fc/Valorant_logo_-_pink_color_version.svg/512px-Valorant_logo_-_pink_color_version.svg.png",
+}
+
 INLINE_KEYS = ["name", "details", "state", "type", "timestamp",
                "large_image_text", "large_image", "small_image", "btn1", "btn2"]
 
@@ -450,7 +472,16 @@ class RPCCog(commands.Cog, name="rpc"):
             except Exception as e:
                 print(f"[rpc] icon endpoint error: {e}")
         if not icon_hash:
-            print(f"[rpc] no icon hash for app {app_id}")
+            # Discord API returned no icon — try the platform fallback URL instead
+            fallback_url = PLATFORM_ICON_FALLBACK_URLS.get(cache_key)
+            if fallback_url:
+                print(f"[rpc] no Discord icon for {app_id} — using fallback URL for {cache_key}")
+                mp_key = await self.upload_asset(fallback_url)
+                if mp_key:
+                    self._icon_cache[cache_key] = mp_key
+                    print(f"[rpc] fallback icon {cache_key} cached → {mp_key[:50]}")
+                return mp_key
+            print(f"[rpc] no icon hash and no fallback URL for app {app_id} ({cache_key})")
             return None
         try:
             # Use .png — discord.py-self DM uploads may reject .webp
