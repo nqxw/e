@@ -85,7 +85,6 @@ GATEWAY_KEYS = {
 
 _MIN_REPUSH_GAP   = 30
 _WATCH_INTERVAL   = 45
-_CDN_REFRESH_EVERY= 20   # watchdog cycles between CDN URL refreshes
 _BOOT_SETTLE      = 5.0
 
 
@@ -240,42 +239,6 @@ class RPCCog(commands.Cog, name="rpc"):
         if ok:  self._save_rpc_slots()
         else:   print("[rpc] push failed — will retry on next watchdog tick")
 
-    # ── CDN refresh ───────────────────────────────────────────────────────────
-    async def _refresh_cdn_url(self, mp_key: str) -> str:
-        """Refresh a discord CDN attachment URL (mp:... keys expire)."""
-        if not mp_key or not mp_key.startswith("mp:"): return mp_key
-        try:
-            h = {"Authorization": S.TOKEN, "Content-Type": "application/json",
-                 "User-Agent": S.USER_AGENT}
-            async with aiohttp.ClientSession() as sess:
-                async with sess.post(
-                    "https://discord.com/api/v9/attachments/refresh-urls",
-                    json={"attachment_urls": [mp_key]}, headers=h
-                ) as r:
-                    if r.status == 200:
-                        data = await r.json()
-                        for entry in data.get("refreshed_urls", []):
-                            if entry.get("refreshed"):
-                                return entry["refreshed"]
-        except Exception as e:
-            print(f"[rpc] cdn refresh: {e}")
-        return mp_key
-
-    async def _refresh_all_assets(self):
-        changed = False
-        for slot in self.rpc_slots:
-            if not slot or "assets" not in slot: continue
-            assets = slot["assets"]
-            for key in ("large_image", "small_image"):
-                val = assets.get(key, "")
-                if val.startswith("mp:"):
-                    new = await self._refresh_cdn_url(val)
-                    if new != val:
-                        assets[key] = new
-                        changed = True
-        if changed and any(s is not None for s in self.rpc_slots):
-            await self.apply_activities()
-            print("[rpc] refreshed cdn attachment urls")
 
     # ── Watchdog ──────────────────────────────────────────────────────────────
     async def _watchdog_boot(self):
@@ -298,11 +261,6 @@ class RPCCog(commands.Cog, name="rpc"):
                 stale     = time.time() - self._last_push_ts > _MIN_REPUSH_GAP
                 if has_slots and stale:
                     await self.apply_activities()
-                if self._watchdog_cycles % _CDN_REFRESH_EVERY == 0:
-                    try:
-                        await self._refresh_all_assets()
-                    except Exception as e:
-                        print(f"[rpc] cdn refresh error: {e}")
             except asyncio.CancelledError:
                 raise
             except Exception as e:
@@ -379,7 +337,7 @@ class RPCCog(commands.Cog, name="rpc"):
         if image_url in self._asset_cache: return self._asset_cache[image_url]
         cdn_re = re.compile(
             r"https?://(?:cdn\.discordapp\.com|media\.discordapp\.net)"
-            r"/attachments/(\d+)/(\d+)/(.+)")
+            r"/attachments/(\d+)/(\d+)/([^?#\s]+)")
         m = cdn_re.search(image_url)
         if m:
             key = f"mp:attachments/{m.group(1)}/{m.group(2)}/{m.group(3)}"
@@ -414,33 +372,45 @@ class RPCCog(commands.Cog, name="rpc"):
     # ── Icon fetch helper ─────────────────────────────────────────────────────
     async def _fetch_app_icon(self, app_id: str, cache_key: str) -> str | None:
         """
-        Fetch a Discord application's icon via the /applications/{id}/rpc endpoint,
-        upload it to Discord CDN via DM, and return the resulting mp:attachments key.
-        Falls back to None so callers can use the raw asset-key string instead.
+        Fetch a Discord application's icon and upload it as an mp:attachments key.
+        The /applications/{id}/rpc endpoint is public — no auth required.
+        Returns the mp:attachments key, or None if anything fails.
         """
         if cache_key in self._icon_cache:
             return self._icon_cache[cache_key]
+        icon_hash = None
+        # Try two endpoints: public RPC info, then authenticated app info
+        for endpoint, needs_auth in [
+            (f"https://discord.com/api/v9/applications/{app_id}/rpc", False),
+            (f"https://discord.com/api/v9/applications/{app_id}",     True),
+        ]:
+            try:
+                h = {"User-Agent": S.USER_AGENT}
+                if needs_auth: h["Authorization"] = S.TOKEN
+                async with aiohttp.ClientSession() as sess:
+                    async with sess.get(endpoint, headers=h) as r:
+                        if r.status == 200:
+                            data = await r.json()
+                            icon_hash = data.get("icon")
+                            if icon_hash:
+                                break
+                        else:
+                            print(f"[rpc] icon endpoint {endpoint}: HTTP {r.status}")
+            except Exception as e:
+                print(f"[rpc] icon endpoint error: {e}")
+        if not icon_hash:
+            print(f"[rpc] no icon hash for app {app_id}")
+            return None
         try:
-            h = {"Authorization": S.TOKEN, "User-Agent": S.USER_AGENT}
-            async with aiohttp.ClientSession(headers=h) as sess:
-                async with sess.get(
-                    f"https://discord.com/api/v9/applications/{app_id}/rpc"
-                ) as r:
-                    if r.status != 200:
-                        print(f"[rpc] icon fetch {app_id}: HTTP {r.status}")
-                        return None
-                    data = await r.json()
-            icon_hash = data.get("icon")
-            if not icon_hash:
-                return None
-            icon_url = f"https://cdn.discordapp.com/app-icons/{app_id}/{icon_hash}.webp?size=512"
-            mp_key   = await self.upload_asset(icon_url)
+            icon_url = (f"https://cdn.discordapp.com/app-icons/"
+                        f"{app_id}/{icon_hash}.webp?size=256")
+            mp_key = await self.upload_asset(icon_url)
             if mp_key:
                 self._icon_cache[cache_key] = mp_key
-                print(f"[rpc] cached icon {cache_key} → {mp_key[:40]}")
+                print(f"[rpc] icon {cache_key} cached → {mp_key[:50]}")
             return mp_key
         except Exception as e:
-            print(f"[rpc] _fetch_app_icon({app_id}): {e}")
+            print(f"[rpc] _fetch_app_icon upload({app_id}): {e}")
             return None
 
     # ── Custom status ─────────────────────────────────────────────────────────
@@ -525,6 +495,9 @@ class RPCCog(commands.Cog, name="rpc"):
                     content=S.ui_ok(f"{label} {field} → {rest}"))
         elif sub == "appname":
             # Force-override the 'name' field regardless of preset — bypasses routing
+            if not rest:
+                return await ctx.message.edit(
+                    content=S.ui_err("usage: rpc1 appname <name>  (cannot be empty)"))
             self._ensure_slot(slot)
             self.rpc_slots[slot]["name"] = rest
             await self.apply_activities()
@@ -799,7 +772,6 @@ class RPCCog(commands.Cog, name="rpc"):
                 f"cycles:       {self._watchdog_cycles}",
                 f"last push:    {'never' if since<0 else f'{since}s ago'}",
                 f"active slots: {active}/6",
-                f"cdn refresh:  every {_CDN_REFRESH_EVERY} cycles",
             ]
             await ctx.message.edit(content=S._ansi_block(lines))
 

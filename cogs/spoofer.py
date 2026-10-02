@@ -260,12 +260,19 @@ class SpooferCog(commands.Cog, name="spoofer"):
         _set_pool([label]); _POOL["mode"] = "sticky"
         _patch_http(self.bot, preset)
         await ctx.message.edit(content=S.ui_ok(f"spoofing → {preset['label']}  (reconnecting…)"))
+
+        # ── Reset stale last-identify record so the wait below is not fooled
+        # by a previous connection's identify (e.g. the initial Desktop boot).
+        _POOL["last"] = None
+
         await self._reconnect()
-        # Wait for identify to fire (up to 10s)
-        for _ in range(10):
+
+        # Wait up to 12 s for the new IDENTIFY to fire and be intercepted
+        for _ in range(12):
             await asyncio.sleep(1)
-            if _POOL["last"]:
+            if _POOL["last"] is not None:
                 break
+
         last = _POOL["last"]
         if last:
             await ctx.channel.send(S.ui_ok(
@@ -274,8 +281,7 @@ class SpooferCog(commands.Cog, name="spoofer"):
                 f"  device={last.get('device','') or 'none'}"))
         else:
             await ctx.channel.send(S.ui_warn(
-                "reconnected — IDENTIFY not intercepted yet  "
-                "(class patch may not have fired; try .spooferdiag)"))
+                "reconnected but IDENTIFY not intercepted — run .spooferdiag"))
 
     # ── Commands ──────────────────────────────────────────────────────────────
     @commands.command(name="spoof", aliases=["spoofer"], brief="Spoof platform — spoof <preset>")
