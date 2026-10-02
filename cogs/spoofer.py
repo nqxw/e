@@ -246,10 +246,33 @@ class SpooferCog(commands.Cog, name="spoofer"):
         _install_class_patch(self.bot)
 
     async def _reconnect(self):
+        """
+        Invalidate the gateway session then close the WebSocket.
+        Clearing session_id / sequence forces the library to send a fresh
+        IDENTIFY (OP 2) on reconnect instead of a RESUME (OP 6).
+        Without this, code-4000 close still resumes — our OP2 interceptor
+        never fires and the platform properties are never rewritten.
+        """
         _STATS["reconnects"] += 1
+
+        # ── Wipe session so the reconnect MUST do a full IDENTIFY ─────────────
+        for obj in (
+            getattr(self.bot, "_connection", None),
+            getattr(self.bot, "ws", None),
+        ):
+            if obj is None:
+                continue
+            for attr in ("session_id", "_session_id",
+                         "sequence",   "_sequence"):
+                try:
+                    if hasattr(obj, attr):
+                        setattr(obj, attr, None)
+                except Exception:
+                    pass
+
         ws = getattr(self.bot, "ws", None)
         if ws:
-            for code in (4000, 1012, 1000):
+            for code in (1000, 4000):
                 try:
                     await ws.close(code=code)
                     return

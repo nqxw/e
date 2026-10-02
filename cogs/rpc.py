@@ -333,8 +333,15 @@ class RPCCog(commands.Cog, name="rpc"):
 
     # ── Asset upload ──────────────────────────────────────────────────────────
     async def upload_asset(self, image_url: str) -> str | None:
+        """
+        Download image_url and re-upload to Discord CDN via DM-with-self.
+        Returns an mp:attachments/... key that works as large_image in activities.
+        Ported from the original modifyself version (the one that actually worked).
+        """
         if not image_url: return None
         if image_url in self._asset_cache: return self._asset_cache[image_url]
+
+        # Fast-path: already a Discord CDN attachment URL → convert directly
         cdn_re = re.compile(
             r"https?://(?:cdn\.discordapp\.com|media\.discordapp\.net)"
             r"/attachments/(\d+)/(\d+)/([^?#\s]+)")
@@ -342,30 +349,74 @@ class RPCCog(commands.Cog, name="rpc"):
         if m:
             key = f"mp:attachments/{m.group(1)}/{m.group(2)}/{m.group(3)}"
             self._asset_cache[image_url] = key
+            self._asset_urls[key] = image_url
             return key
-        if not self.bot.user: return None
+
+        if not self.bot or not getattr(self.bot, "user", None):
+            print("[rpc] upload_asset: bot.user not ready")
+            return None
+
         try:
-            h = {"Authorization": S.TOKEN, "User-Agent": S.USER_AGENT}
-            async with aiohttp.ClientSession(headers=h) as sess:
+            # Use Discord-style headers — some CDNs check Referer/UA
+            fetch_h = {
+                "Authorization": S.TOKEN,
+                "User-Agent": (
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "discord/1.0.9191 Chrome/132.0.0.0 Safari/537.36"
+                ),
+                "Accept":   "image/*,*/*;q=0.8",
+                "Referer":  "https://discord.com/",
+            }
+            async with aiohttp.ClientSession(headers=fetch_h) as sess:
                 async with sess.get(image_url) as r:
-                    if r.status != 200: return None
-                    data = await r.read()
+                    if r.status != 200:
+                        print(f"[rpc] upload_asset fetch {r.status}: {image_url[:80]}")
+                        return None
+                    image_bytes = await r.read()
+
+            if not image_bytes:
+                print("[rpc] upload_asset: empty body")
+                return None
+
+            # Derive filename; Discord may reject .webp in DMs — rename to .png
             raw  = image_url.split("/")[-1].split("?")[0]
-            name = raw if "." in raw and len(raw) <= 50 else "asset.png"
-            dm   = self.bot.user.dm_channel or await self.bot.user.create_dm()
-            msg  = await dm.send(file=discord.File(io.BytesIO(data), filename=name))
+            name = raw if ("." in raw and len(raw) <= 50) else "asset.png"
+            if name.lower().endswith(".webp"):
+                name = name.rsplit(".", 1)[0] + ".png"
+
+            # Get DM channel with self
+            self_dm = self.bot.user.dm_channel
+            if self_dm is None:
+                self_dm = await self.bot.user.create_dm()
+
+            msg = await self_dm.send(
+                file=discord.File(io.BytesIO(image_bytes), filename=name))
+
             if msg.attachments:
-                url = getattr(msg.attachments[0], "url", None)
-                if url:
-                    m2 = cdn_re.search(url)
+                att     = msg.attachments[0]
+                # Handle both object and dict form (discord.py-self varies)
+                new_url = (att.get("url") if isinstance(att, dict)
+                           else getattr(att, "url", None))
+                if new_url:
+                    m2 = cdn_re.search(new_url)
                     if m2:
                         key = f"mp:attachments/{m2.group(1)}/{m2.group(2)}/{m2.group(3)}"
                         self._asset_cache[image_url] = key
-                        self._asset_urls[key] = image_url   # track for CDN refresh
+                        self._asset_urls[key] = image_url
                         self._save_asset_urls()
+                        print(f"[rpc] upload_asset ok: {key[:60]}")
                         return key
+                    print(f"[rpc] upload_asset: no CDN match in {new_url[:80]}")
+                else:
+                    print("[rpc] upload_asset: no url on attachment")
+            else:
+                print("[rpc] upload_asset: msg has no attachments")
+
         except Exception as e:
-            print(f"[rpc] upload_asset: {e}")
+            import traceback as _tb
+            print(f"[rpc] upload_asset failed: {type(e).__name__}: {e}")
+            _tb.print_exc()
         return None
 
 
@@ -402,8 +453,10 @@ class RPCCog(commands.Cog, name="rpc"):
             print(f"[rpc] no icon hash for app {app_id}")
             return None
         try:
+            # Use .png — discord.py-self DM uploads may reject .webp
             icon_url = (f"https://cdn.discordapp.com/app-icons/"
-                        f"{app_id}/{icon_hash}.webp?size=256")
+                        f"{app_id}/{icon_hash}.png?size=256")
+            print(f"[rpc] fetching icon for {cache_key}: {icon_url[:80]}")
             mp_key = await self.upload_asset(icon_url)
             if mp_key:
                 self._icon_cache[cache_key] = mp_key
